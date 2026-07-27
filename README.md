@@ -39,3 +39,5 @@ For the phenometrics, you can change the sensor_config if you would like. The fi
 - quality_pixel_cnt
 
 Then, change the sensor_config and n_knots for the other sensor and run that phenometrics call. Once you have the tif files, you can run plot_annual_phenometrics to visualize the rasters and/or run build_summary_df_from_tifs and _plot_phenology_summary to create line graphs comparing the annual phenometrics of HLS and MODIS.
+
+Note: due to how the code works, context is required for the year before and after the target year, so the first and last year in a range will likely seem a bit off compared to the years in-between, since they cannot use the full context.
