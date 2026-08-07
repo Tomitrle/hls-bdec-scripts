@@ -928,3 +928,309 @@ class ChunkedTimeSeriesReaderStreaming:
             n_workers=n_workers,
             **process_kwargs,
         )
+
+def save_spline_comparison_netcdf(pre_spline: xr.DataArray, 
+                                   post_spline: xr.DataArray,
+                                   central_year: int,
+                                   output_dir: Path,
+                                   y_coords: np.ndarray,
+                                   x_coords: np.ndarray,
+                                   crs: str):
+    """Save pre/post spline comparison as NetCDF."""
+    
+    if output_dir is None:
+        output_dir = Path(f"./spline_comparison_{central_year}")
+    output_dir.mkdir(exist_ok=True, parents=True)
+    
+    print(f"\n=== Saving spline comparison as NetCDF ===")
+    print(f"  Pre-spline shape: {pre_spline.shape}")
+    print(f"  Post-spline shape: {post_spline.shape}")
+    
+    # Ensure both have proper coordinates
+    if not hasattr(pre_spline, 'y') or len(pre_spline.y) != len(y_coords):
+        pre_spline = pre_spline.assign_coords(y=y_coords, x=x_coords)
+    if not hasattr(post_spline, 'y') or len(post_spline.y) != len(y_coords):
+        post_spline = post_spline.assign_coords(y=y_coords, x=x_coords)
+    
+    # Create dataset with multiple variables
+    ds = xr.Dataset({
+        'evi_raw': pre_spline.rename('evi_raw'),
+        'evi_smoothed': post_spline.rename('evi_smoothed'),
+        'difference': (post_spline - pre_spline).rename('difference'),
+    })
+    
+    # Add CRS and metadata
+    ds.attrs['crs'] = crs
+    ds.attrs['central_year'] = central_year
+    ds.attrs['description'] = f'EVI spline smoothing comparison for {central_year}'
+    ds.attrs['created'] = pd.Timestamp.now().isoformat()
+    
+    # Add variable descriptions
+    ds['evi_raw'].attrs['long_name'] = 'Raw EVI (after despiking)'
+    ds['evi_raw'].attrs['units'] = 'dimensionless'
+    
+    ds['evi_smoothed'].attrs['long_name'] = 'Spline-smoothed EVI'
+    ds['evi_smoothed'].attrs['units'] = 'dimensionless'
+    
+    ds['difference'].attrs['long_name'] = 'Smoothing residuals'
+    ds['difference'].attrs['description'] = 'evi_smoothed - evi_raw'
+    ds['difference'].attrs['units'] = 'dimensionless'
+    
+    # Save
+    output_file = output_dir / f"spline_comparison_{central_year}.nc"
+    ds.to_netcdf(output_file, mode = 'w')
+    
+    print(f"  Saved NetCDF: {output_file}")
+    print(f"  Variables: {list(ds.data_vars)}")
+    print(f"  Dimensions: {dict(ds.dims)}")
+    
+    return output_file
+
+def plot_spline_comparison(ds, yi, xi, target_year=None, outdir=None):
+    """
+    Plot raw vs smoothed EVI with proper NaN handling.
+    
+    Args:
+        ds: xarray Dataset with evi_raw, evi_smoothed, difference
+        yi, xi: Pixel indices
+        target_year: Optional year to highlight
+    """
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8))
+    
+    # Extract and drop NaN separately for each variable
+    raw = ds['evi_raw'].isel(y=yi, x=xi).dropna(dim='time')
+    smoothed = ds['evi_smoothed'].isel(y=yi, x=xi).dropna(dim='time')
+    diff = ds['difference'].isel(y=yi, x=xi).dropna(dim='time')
+    
+    # --- Time series ---
+    ax1.plot(raw.time.values, raw.values, 'o', 
+             markersize=5, alpha=0.8, color='C0', label='Raw')
+    ax1.plot(smoothed.time.values, smoothed.values, '-', 
+             linewidth=2, color='C1', label='Smoothed')
+    
+    # Add year boundaries
+    if target_year:
+        ax1.axvline(pd.Timestamp(f'{target_year}-01-01'), color='black', 
+                   linestyle='--', linewidth=2, alpha=0.9)
+        ax1.axvline(pd.Timestamp(f'{target_year}-12-31'), color='black', 
+                   linestyle='--', linewidth=2, alpha=0.9)
+    
+    ax1.set_title(f'Pixel ({yi}, {xi}) - EVI Time Series')
+    ax1.set_xlabel('Time')
+    ax1.set_ylabel('EVI')
+    diff_target_year = diff.sel(time = str(target_year))
+    rmse = np.sqrt(np.nanmean(diff_target_year.values ** 2))
+    mae = np.nanmean(np.abs(diff_target_year.values))
+    # mbe = np.nanmean(diff.values)
+    
+    stats_text = f'RMSE: {rmse:.4f}\nMAE: {mae:.4f}'
+    ax2.text(0.02, 0.98, stats_text, transform=ax2.transAxes, fontsize=9,
+            verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+    
+    ax1.legend()
+    
+    ymin = np.nanmin(raw.values)
+    ymax = np.nanmax(raw.values)
+    padding = (ymax - ymin) * 0.1
+
+    ax1.set_ylim(ymin - padding, ymax + padding)
+    ax1.grid(True, alpha=0.3)
+    
+    # --- Residuals ---
+    ax2.plot(diff.time.values, diff.values, 'o', markersize=4, alpha=0.7)
+    ax2.axhline(0, color='black', linestyle='--', linewidth=1)
+    
+    # Add stats   
+    ax2.set_title('Smoothing Residuals')
+    ax2.set_xlabel('Time')
+    ax2.set_ylabel('Residual (Smoothed - Raw)')
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    if outdir:
+        plt.savefig(f'{outdir}/pixel_comparison-y{yi}_x{xi}.png', dpi=500)
+    plt.show()
+    
+    # Print data summary
+    print(f"\nPixel ({yi}, {xi}) summary:")
+    print(f"  Raw: {len(raw)} valid of {len(ds.time)} timesteps")
+    print(f"  Smoothed: {len(smoothed)} valid")
+    print(f"  RMSE: {rmse:.4f}, MAE: {mae:.4f}")
+
+
+def plot_pixel_phenometrics(ds, chunk_results, yi=0, xi=1, target_year=2019):
+    """Plot raw/smoothed EVI with all phenometric markers."""
+    
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(18, 12), 
+                                    gridspec_kw={'height_ratios': [2, 2]})
+    
+    # Extract and drop NaN
+    raw = ds['evi_raw'].isel(y=yi, x=xi).dropna(dim='time')
+    smoothed = ds['evi_smoothed'].isel(y=yi, x=xi).dropna(dim='time')
+    
+    # Plot raw and smoothed
+    ax1.plot(raw.time.values, raw.values, 'o', 
+             markersize=5, alpha=0.5, color='C0', label='Raw')
+    ax1.plot(smoothed.time.values, smoothed.values, '-', 
+             linewidth=2, color='C1', label='Smoothed')
+    
+    def doy_to_date(doy):
+        if np.isnan(doy):
+            return None
+        return pd.Timestamp(f"{target_year}-01-01") + pd.Timedelta(days=int(doy) - 1)
+    
+    def get_val(key):
+        """Get metric value using key_YYYY format."""
+        full_key = f"{key}_{target_year}"
+        if full_key in chunk_results:
+            arr = chunk_results[full_key]
+            if arr.ndim == 3:
+                return arr[0, yi, xi]
+            elif arr.ndim == 2:
+                return arr[yi, xi]
+        return np.nan
+    
+    # Year boundaries
+    ax1.axvline(pd.Timestamp(f'{target_year}-01-01'), color='black', 
+               linestyle='--', linewidth=1, alpha=0.5)
+    ax1.axvline(pd.Timestamp(f'{target_year}-12-31'), color='black', 
+               linestyle='--', linewidth=1, alpha=0.5)
+    
+    # Threshold line
+    thresh = get_val('greenup_threshold')
+    if not np.isnan(thresh):
+        ax1.axhline(thresh, color='gray', linestyle=':', alpha=0.8, linewidth = 2,
+                    label=f'Threshold ({thresh:.3f})')
+    
+    # All DOY-based markers to plot
+    markers = [
+        ('greenup_doy', 'greenup_evi', 'v', 'limegreen', 'Greenup'),
+        ('max_doy', 'max_evi', '^', 'red', 'Peak'),
+        ('dormancy_doy', 'dormancy_evi', 'v', 'brown', 'Dormancy'),
+        ('min_doy', 'min_evi', 's', 'blue', 'Min'),
+        ('greenup_rate_doy', None, 'D', 'lime', 'Steepest Greenup'),
+        ('senescence_rate_doy', None, 'D', 'orange', 'Steepest Senescence'),
+    ]
+    
+    for doy_key, evi_key, marker, color, label in markers:
+        doy_val = get_val(doy_key)
+        if np.isnan(doy_val):
+            continue
+        
+        date = doy_to_date(doy_val)
+        if date is None:
+            continue
+        
+        # Get EVI value
+        if evi_key is not None:
+            evi_val = get_val(evi_key)
+        else:
+            # Find closest smoothed value in target year
+            target_doys = smoothed.time.dt.dayofyear.values
+            target_years = smoothed.time.dt.year.values
+            year_mask = target_years == target_year
+            if year_mask.sum() > 0:
+                year_doys = target_doys[year_mask]
+                year_vals = smoothed.values[year_mask]
+                closest_idx = np.argmin(np.abs(year_doys - doy_val))
+                evi_val = year_vals[closest_idx]
+            else:
+                evi_val = np.nan
+        
+        if np.isnan(evi_val):
+            continue
+        
+        # Build label with rate info if applicable
+        if 'greenup_rate' in doy_key:
+            rate = get_val('greenup_rate')
+            label = f'{label} (DOY {doy_val:.0f}, {rate:.4f}/day)'
+        elif 'senescence_rate' in doy_key:
+            rate = get_val('senescence_rate')
+            label = f'{label} (DOY {doy_val:.0f}, {rate:.4f}/day)'
+        else:
+            label = f'{label} (DOY {doy_val:.0f}, EVI {evi_val:.3f})'
+        
+        ax1.plot(date, evi_val, marker, color=color, markersize=12,
+                markeredgecolor='black', markeredgewidth=1, zorder=10,
+                label=label)
+        ax1.axvline(date, color=color, linestyle=':', alpha=0.8, linewidth = 2)
+    
+    # AUC shading
+    greenup_d = get_val('greenup_doy')
+    dorm_d = get_val('dormancy_doy')
+    min_e = get_val('min_evi')
+    
+    if not np.isnan(greenup_d) and not np.isnan(dorm_d) and not np.isnan(min_e):
+        gs_mask = ((smoothed.time.dt.year == target_year) &
+                   (smoothed.time.dt.dayofyear >= greenup_d) & 
+                   (smoothed.time.dt.dayofyear <= dorm_d))
+        gs_data = smoothed.where(gs_mask, drop=True)
+        
+        if len(gs_data) > 0:
+            auc_net = get_val('auc_net')
+            ax1.fill_between(gs_data.time.values, min_e, gs_data.values,
+                           alpha=0.15, color='green',
+                           label=f'AUC net ({auc_net:.1f})' if not np.isnan(auc_net) else 'AUC net')
+    
+    ax1.set_title(f'Pixel ({yi}, {xi}) - EVI Phenometrics {target_year}')
+    ax1.set_xlabel('Time')
+    ax1.set_ylabel('EVI')
+    ax1.legend(fontsize=7, loc='upper right', ncol=2)
+    ax1.grid(True, alpha=0.3)
+    
+    # ================================================================
+    # Bottom panel: Summary table with NaN flagging
+    # ================================================================
+    ax2.axis('off')
+    
+    all_metrics = [
+        ('Mean EVI', 'mean_evi', 'EVI', '.4f'),
+        ('Max EVI', 'max_evi', 'EVI', '.4f'),
+        ('Min EVI', 'min_evi', 'EVI', '.4f'),
+        ('Amplitude', 'amplitude', 'EVI', '.4f'),
+        ('Max DOY', 'max_doy', 'DOY', '.0f'),
+        ('Min DOY', 'min_doy', 'DOY', '.0f'),
+        ('Greenup DOY', 'greenup_doy', 'DOY', '.0f'),
+        ('Greenup EVI', 'greenup_evi', 'EVI', '.4f'),
+        ('Dormancy DOY', 'dormancy_doy', 'DOY', '.0f'),
+        ('Dormancy EVI', 'dormancy_evi', 'EVI', '.4f'),
+        ('Growing Season', 'growing_season_length', 'days', '.0f'),
+        ('Threshold', 'greenup_threshold', 'EVI', '.4f'),
+        ('AUC Full', 'auc_full', 'EVI·days', '.1f'),
+        ('AUC Net', 'auc_net', 'EVI·days', '.1f'),
+        ('Greenup Rate', 'greenup_rate', 'EVI/day', '.5f'),
+        ('Greenup Rate DOY', 'greenup_rate_doy', 'DOY', '.0f'),
+        ('Senescence Rate', 'senescence_rate', 'EVI/day', '.5f'),
+        ('Senescence Rate DOY', 'senescence_rate_doy', 'DOY', '.0f'),
+        # ('Mean Revisit', 'mean_revisit_time', 'days', '.1f'),
+    ]
+    
+    valid_lines = []
+    nan_lines = []
+    
+    for label, key, units, fmt in all_metrics:
+        val = get_val(key)
+        if np.isnan(val):
+            nan_lines.append(f"  {label:<25} {'NaN':>12}  {units}")
+        else:
+            valid_lines.append(f"  {label:<25} {val:>{12}{fmt}}  {units}")
+    
+    text = f"  VALID METRICS ({len(valid_lines)})\n"
+    text += "  " + "─" * 50 + "\n"
+    text += "\n".join(valid_lines)
+    
+    if nan_lines:
+        text += f"\n\n  ⚠ NaN METRICS ({len(nan_lines)})\n"
+        text += "  " + "─" * 50 + "\n"
+        text += "\n".join(nan_lines)
+    
+    ax2.text(0.05, 0.95, text, transform=ax2.transAxes, fontsize=9,
+            verticalalignment='top', family='monospace',
+            bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
+    
+    ax2.set_title(f'Phenometric Summary - Pixel ({yi}, {xi}) - {target_year}')
+    
+    plt.tight_layout()
+    plt.savefig(f'phenometrics_pixel_{yi}_{xi}_{target_year}.png', 
+                dpi=150, bbox_inches='tight')
+    plt.show()
