@@ -1058,7 +1058,7 @@ def plot_spline_comparison(ds, yi, xi, target_year=None, outdir=None):
     print(f"  RMSE: {rmse:.4f}, MAE: {mae:.4f}")
 
 
-def plot_pixel_phenometrics(ds, chunk_results, yi=0, xi=1, target_year=2019):
+def plot_pixel_phenometrics(ds, chunk_results, yi=0, xi=1, target_year=None):
     """Plot raw/smoothed EVI with all phenometric markers."""
     
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(18, 12), 
