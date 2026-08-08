@@ -1184,16 +1184,16 @@ def plot_pixel_phenometrics(ds, chunk_results, yi=0, xi=1, target_year=None):
     ax2.axis('off')
     
     all_metrics = [
-        ('Mean EVI', 'mean_evi', 'EVI', '.4f'),
-        ('Max EVI', 'max_evi', 'EVI', '.4f'),
-        ('Min EVI', 'min_evi', 'EVI', '.4f'),
+        ('Mean EVI', 'mean_vi', 'EVI', '.4f'),
+        ('Max EVI', 'max_vi', 'EVI', '.4f'),
+        ('Min EVI', 'min_vi', 'EVI', '.4f'),
         ('Amplitude', 'amplitude', 'EVI', '.4f'),
         ('Max DOY', 'max_doy', 'DOY', '.0f'),
         ('Min DOY', 'min_doy', 'DOY', '.0f'),
         ('Greenup DOY', 'greenup_doy', 'DOY', '.0f'),
-        ('Greenup EVI', 'greenup_evi', 'EVI', '.4f'),
+        ('Greenup EVI', 'greenup_vi', 'EVI', '.4f'),
         ('Dormancy DOY', 'dormancy_doy', 'DOY', '.0f'),
-        ('Dormancy EVI', 'dormancy_evi', 'EVI', '.4f'),
+        ('Dormancy EVI', 'dormancy_vi', 'EVI', '.4f'),
         ('Growing Season', 'growing_season_length', 'days', '.0f'),
         ('Threshold', 'greenup_threshold', 'EVI', '.4f'),
         ('AUC Full', 'auc_full', 'EVI·days', '.1f'),
