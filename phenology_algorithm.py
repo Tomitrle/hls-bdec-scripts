@@ -827,7 +827,7 @@ def _process_worker_slice(
                 w_valid[y_valid > hi] *= 2.0
 
             # 5. Knots: trim the precomputed set to this pixel's range
-            x_range  = x_valid[-1] - x_valid[0]            
+            # x_range  = x_valid[-1] - x_valid[0]            
             if use_context_months:
                 if sensor == "HLS":
                     n_knots = min(max(len(x_valid) // 3, 12), len(x_valid) - k - 1)
@@ -920,12 +920,84 @@ def _process_worker_slice(
 
     return row_start, row_end, result, r_out, r2_out, rmse_out
 
+def _process_worker_slice_savgol(
+    vi_mmap_path:     str,
+    doy_mmap_path:    str,
+    cube_shape:       tuple,          # (n_times, ny, nx)
+    row_start:        int,
+    row_end:          int,
+    t_nominal:        np.ndarray,
+    t_daily:          np.ndarray,
+    min_valid_points: int,
+    value_min:        float,
+    value_max:        float,
+    fill_low_data:    str,
+    n_output:         int,
+    window_length:    int,
+    polyorder:        int,
+) -> tuple[int, int, np.ndarray]:
+    """
+    Savitzky-Golay smoothing worker.
+    Linearly interpolates sparse obs to daily then applies SG filter.
+    """
+    from scipy.signal import savgol_filter
+
+    vi_data = np.memmap(vi_mmap_path, dtype=np.float32, mode="r", shape=cube_shape)
+    if doy_mmap_path is not None:
+        doy_data = np.memmap(doy_mmap_path, dtype=np.float32, mode="r", shape=cube_shape)
+    n_rows   = row_end - row_start
+    nx       = cube_shape[2]
+    result   = np.full((n_output, n_rows, nx), np.nan, dtype=np.float32)
+
+    for local_yi, yi in enumerate(range(row_start, row_end)):
+        for xi in range(nx):
+            ts = vi_data[:, yi, xi]
+            if doy_mmap_path is not None:
+                # Change doy based on ref_date
+                t_pixel = doy_data[:, yi, xi]
+                valid = np.isfinite(ts) & np.isfinite(t_pixel)
+            else:
+                t_pixel = t_nominal
+                valid = np.isfinite(ts)
+
+            if valid.sum() < min_valid_points:
+                if fill_low_data == "mean" and valid.sum() > 0:
+                    result[:, local_yi, xi] = np.nanmean(ts[valid])
+                continue
+
+            x_valid = t_pixel[valid]
+            y_valid = ts[valid].astype(np.float64)
+
+            # 1. Linear interpolation to daily grid
+            daily_interp = np.interp(t_daily, x_valid, y_valid)
+
+            # 2. SG filter — ensure window_length doesn't exceed series length
+            wl = min(window_length, len(daily_interp))
+            wl = wl if wl % 2 == 1 else wl - 1   # must be odd
+            if wl <= polyorder:
+                result[:, local_yi, xi] = daily_interp.astype(np.float32)
+                continue
+
+            try:
+                smoothed = savgol_filter(daily_interp, window_length=wl, polyorder=polyorder)
+                result[:, local_yi, xi] = np.clip(
+                    smoothed, value_min, value_max
+                ).astype(np.float32)
+            except Exception:
+                if fill_low_data == "mean":
+                    result[:, local_yi, xi] = float(np.nanmean(y_valid))
+
+    return row_start, row_end, result
+
 def smooth_vi_chunk_for_year(
     chunk:                xr.DataArray,
     target_year:          int,
     doy_data:             xr.DataArray = None,
     sensor:               str = "HLS",
     # --- algorithm config ---
+    smoother:             str   = "spline", # spline | savgol
+    savgol_window:        int   = 31,   # days odd
+    savgol_polyorder:     int   = 3,       
     min_valid_points:     int   = 8,
     min_valid_frac:       float = 0.30,
     fill_low_data:        str   = "nan",  # currently no gap filling, Bolton uses the context years to "grab" similar values but that's a weaker method 
@@ -1157,33 +1229,52 @@ def smooth_vi_chunk_for_year(
         t_dispatch = time.time()
 
         # Shared kwargs — same for every worker
-        worker_kwargs = dict(
-            vi_mmap_path       = vi_path,
-            doy_mmap_path      = doy_path,
-            cube_shape         = cube_shape,
-            t_nominal          = t_nominal,
-            weights_template   = weights_template,
-            t_daily            = t_daily,
-            min_valid_points   = effective_min_valid,
-            value_min          = value_min,
-            value_max          = value_max,
-            fill_low_data      = fill_low_data,
-            k                  = k,
-            n_output           = n_output,
-            use_context_months = use_context_months,
-            target_year_offset = target_year_offset,
-            sensor             = sensor,
-        )
-
+        if smoother == "savgol":
+            worker_kwargs = dict(
+                vi_mmap_path     = vi_path,
+                doy_mmap_path    = doy_path,
+                cube_shape       = cube_shape,
+                t_nominal        = t_nominal,
+                t_daily          = t_daily,
+                min_valid_points = effective_min_valid,
+                value_min        = value_min,
+                value_max        = value_max,
+                fill_low_data    = fill_low_data,
+                n_output         = n_output,
+                window_length    = savgol_window,
+                polyorder        = savgol_polyorder,
+            )
+            worker_fn = _process_worker_slice_savgol
+        else:
+            worker_kwargs = dict(
+                vi_mmap_path       = vi_path,
+                doy_mmap_path      = doy_path,
+                cube_shape         = cube_shape,
+                t_nominal          = t_nominal,
+                weights_template   = weights_template,
+                t_daily            = t_daily,
+                min_valid_points   = effective_min_valid,
+                value_min          = value_min,
+                value_max          = value_max,
+                fill_low_data      = fill_low_data,
+                k                  = k,
+                n_output           = n_output,
+                use_context_months = use_context_months,
+                target_year_offset = target_year_offset,
+                sensor             = sensor,
+            )
+            worker_fn = _process_worker_slice
+        print(f"  Smoother  : {smoother}"
+              + (f" (window={savgol_window}, polyorder={savgol_polyorder})"
+                if smoother == "savgol" else f" (k={k})"))
+        
         executor = _pool or Parallel(
             n_jobs=n_workers, prefer="processes", batch_size="auto"
         )
 
         # use precomputed row-wise worker slices to distribute with kwargs to workers
         results = executor(
-            delayed(_process_worker_slice)(
-                row_start=s, row_end=e, **worker_kwargs
-            )
+            delayed(worker_fn)(row_start=s, row_end=e, **worker_kwargs)
             for s, e in worker_slices
         )
 
@@ -1191,30 +1282,37 @@ def smooth_vi_chunk_for_year(
         # 11. Reassemble
         # ----------------------------------------------------------------
         n_fitted = n_skipped = 0
-        for row_start, row_end, row_result, row_r, row_r2, row_rmse in results:
-            smoothed_out[:, row_start:row_end, :] = row_result
-            finite_mask = np.any(np.isfinite(row_result), axis=0)   # (n_rows, nx)
-            n_fitted  += int(finite_mask.sum())
-            n_skipped += int((~finite_mask).sum())
-            # Reassemble regression metrics
-            r_all[row_start:row_end] = row_r
-            r2_all[row_start:row_end] = row_r2
-            rmse_all[row_start:row_end] = row_rmse
 
-    # Print regression summary
-    print("Spline regression summary")
-    print("r:")
-    print(f"mean = {np.nanmean(r_all):.3f}")
-    print(f"min  = {np.nanmin(r_all):.3f}")
-    print(f"max  = {np.nanmax(r_all):.3f}")
-    print("R2:")
-    print(f"mean = {np.nanmean(r2_all):.3f}")
-    print(f"min  = {np.nanmin(r2_all):.3f}")
-    print(f"max  = {np.nanmax(r2_all):.3f}")
-    print("RMSE:")
-    print(f"mean = {np.nanmean(rmse_all):.3f}")
-    print(f"min  = {np.nanmin(rmse_all):.3f}")
-    print(f"max  = {np.nanmax(rmse_all):.3f}")
+        if smoother == "savgol":
+            for row_start, row_end, row_result, in results:
+                smoothed_out[:, row_start:row_end, :] = row_result
+                finite_mask = np.any(np.isfinite(row_result), axis=0)   # (n_rows, nx)
+                n_fitted  += int(finite_mask.sum())
+                n_skipped += int((~finite_mask).sum())
+        else:
+            for row_start, row_end, row_result, row_r, row_r2, row_rmse in results:
+                smoothed_out[:, row_start:row_end, :] = row_result
+                finite_mask = np.any(np.isfinite(row_result), axis=0)   # (n_rows, nx)
+                n_fitted  += int(finite_mask.sum())
+                n_skipped += int((~finite_mask).sum())
+                # Reassemble regression metrics
+                r_all[row_start:row_end] = row_r
+                r2_all[row_start:row_end] = row_r2
+                rmse_all[row_start:row_end] = row_rmse
+            # Print regression summary
+            print("Spline regression summary")
+            print("r:")
+            print(f"mean = {np.nanmean(r_all):.3f}")
+            print(f"min  = {np.nanmin(r_all):.3f}")
+            print(f"max  = {np.nanmax(r_all):.3f}")
+            print("R2:")
+            print(f"mean = {np.nanmean(r2_all):.3f}")
+            print(f"min  = {np.nanmin(r2_all):.3f}")
+            print(f"max  = {np.nanmax(r2_all):.3f}")
+            print("RMSE:")
+            print(f"mean = {np.nanmean(rmse_all):.3f}")
+            print(f"min  = {np.nanmin(rmse_all):.3f}")
+            print(f"max  = {np.nanmax(rmse_all):.3f}")
 
     # ----------------------------------------------------------------
     # 12. Timing summary
@@ -1665,16 +1763,16 @@ def get_context_months_from_gaps(
     exceeds gap_threshold_days, context years will cause edge spikes.
     Return 0 context months in that case.
     """
-    # Check if chunk has the context
-    min_date = pd.Timestamp(chunk.time.min().values)
-    max_date = pd.Timestamp(chunk.time.max().values)
+    # # Check if chunk has the context
+    # min_date = pd.Timestamp(chunk.time.min().values)
+    # max_date = pd.Timestamp(chunk.time.max().values)
     
-    # Chunk should have data from previous and next years
-    required_start = pd.Timestamp(f"{target_year}-01-01") - pd.DateOffset(months=12)
-    required_end   = pd.Timestamp(f"{target_year}-12-31") + pd.DateOffset(months=12)
+    # # Chunk should have data from previous and next years
+    # required_start = pd.Timestamp(f"{target_year}-01-01") - pd.DateOffset(months=12)
+    # required_end   = pd.Timestamp(f"{target_year}-12-31") + pd.DateOffset(months=12)
 
-    if min_date > required_start or max_date < required_end:
-        return False
+    # if min_date > required_start or max_date < required_end:
+    #     return False
 
     
     target_obs = chunk.sel(time=str(target_year))
@@ -1763,7 +1861,9 @@ def full_pipeline_chunk(chunk: xr.DataArray,
                         despike_max_gap: int = 45,
                         despike_abs_threshold: float = 0.1,
                         despike_rel_threshold: float = 2.0,
+                        use_infill: bool = True,
                         gap_threshold_days: int = 45,
+                        smoother: str = "spline",
                         target_year: int = None,
                         testing_mode: bool = False,
                         _pool = None,
@@ -1848,6 +1948,46 @@ def full_pipeline_chunk(chunk: xr.DataArray,
             
     chunk_post_despike = chunk.copy(deep=True) if testing_mode else None
 
+    # -----------------------------------------------------------------------------------------
+    # Step 3b: Context-year gap infill
+    # Uses despiked observations from context years to fill gaps in the
+    # target year before the spline sees the data.
+    # context_infill_diagnostics = None
+    # target_da_for_spline = chunk.sel(time=str(target_year))  # default: no infill
+
+    # use_context_months = get_context_months_from_gaps(chunk=chunk, target_year=target_year)
+    # context_years_present = sorted({
+    #     int(y) for y in chunk.time.dt.year.values
+    #     if int(y) != target_year
+    # })
+
+    # if len(context_years_present) >= 1 and use_infill == True:
+    #     print("Step 3b: Context-year observation infill")
+    #     target_da_for_spline, context_infill_diagnostics = build_context_infilled_observations(
+    #         chunk_despiked  = chunk,             # full 3-yr despiked DataArray
+    #         target_year     = target_year,
+    #         n_harmonics     = 3,
+    #         min_similarity  = 0.60,              # tune: lower = more permissive infill
+    #         scale_to_target = True,
+    #         testing_mode    = testing_mode,
+    #     )
+    #     # Rebuild a chunk that contains the infilled target year so the spline
+    #     # fitter receives the augmented observations
+    #     other_years = chunk.sel(
+    #         time=~chunk.time.dt.year.isin([target_year])
+    #     )
+    #     chunk_for_spline = xr.concat(
+    #         [other_years, target_da_for_spline],
+    #         dim="time"
+    #     ).sortby("time")
+    # else:
+    #     print("Step 3b: Context infill skipped "
+    #             f"(use_context_months={use_context_months}, "
+    #             f"context_years={context_years_present})")
+    #     chunk_for_spline = chunk
+
+    # chunk_post_context_infill = chunk_for_spline.copy(deep=True) if testing_mode else None
+
     # Step 3: calculate scene revisit and quality pixels before the spline fit, 365 DOY data is generated
     print("Step 3: Scene quality metrics")
     scene_mean_revisit, scene_quality_pixels = compute_scene_quality_metrics(chunk, target_year)
@@ -1864,7 +2004,7 @@ def full_pipeline_chunk(chunk: xr.DataArray,
         }
         
     # Step 4: apply penalized cubic spline interpolation
-    print("Step 4: Apply spline")
+    print("Step 4: Apply interpolation")
     use_context_months = get_context_months_from_gaps(chunk=chunk,target_year=target_year,gap_threshold_days=gap_threshold_days)    
     fill_snow_gaps     = not use_context_months 
     print(f"  use_context_months : {use_context_months}")
@@ -1874,6 +2014,7 @@ def full_pipeline_chunk(chunk: xr.DataArray,
         chunk,
         doy_data=doy_data,
         target_year=target_year,
+        smoother = smoother,
         testing_mode=testing_mode,
         use_context_months=use_context_months,
         _pool=_pool,
@@ -1901,28 +2042,73 @@ def full_pipeline_chunk(chunk: xr.DataArray,
     
         before_first = daily_doy < first_obs_doy
         after_last   = daily_doy > last_obs_doy
-        no_data      = ~has_any
-    
-        # Spline value at the exact boundary day [y, x]
-        first_doy_idx  = (daily_doy == first_obs_doy)
-        last_doy_idx   = (daily_doy == last_obs_doy)
-    
-        spline_at_first = smoothed_year.where(first_doy_idx).max(dim="time")
-        spline_at_last  = smoothed_year.where(last_doy_idx).max(dim="time")
-    
-        # Fill = min(background, spline at boundary) — never step up OR down
-        lead_fill  = xr.where(spline_at_first < bg, spline_at_first, bg)
-        trail_fill = xr.where(spline_at_last  < bg, spline_at_last,  bg)
-    
-        smoothed_year = smoothed_year.where(~(before_first | no_data), other=lead_fill)
-        smoothed_year = smoothed_year.where(~(after_last   | no_data), other=trail_fill)    
-        smoothed_year_pheno = smoothed_daily.sel(time=str(target_year)).where(
-            (daily_doy >= first_obs_doy) & (daily_doy <= last_obs_doy)
+        
+        # no_data      = ~has_any
+        outside_obs  = (before_first | after_last | ~has_any)
+
+        # Spline is kept where it sits above the floor; clamped to floor where below
+        smoothed_year = xr.where(
+            outside_obs,
+            xr.ufuncs.maximum(smoothed_year, bg),   # let spline continue if above bg
+            smoothed_year                            # inside obs window: untouched
         )
-        chunk_post_snow_fill = smoothed_year.copy(deep=True) if testing_mode else None
+    
+        # ── Transition DOYs ───────────────────────────────────────────────
+        spline_above_bg = smoothed_year > bg
+        rising_idx      = spline_above_bg.argmax(dim="time")
+        falling_idx     = (spline_above_bg.sizes["time"] - 1
+                           - spline_above_bg.isel(time=slice(None, None, -1))
+                                            .argmax(dim="time"))
+        any_above       = spline_above_bg.any(dim="time")
+        rising_doy      = daily_doy.isel(time=rising_idx ).where(any_above)
+        falling_doy     = daily_doy.isel(time=falling_idx).where(any_above)
+
+        # ── Prevent post-season spline rebound ────────────────────────────
+        vals     = smoothed_year.values.copy()   # (T, ny, nx)
+        doys_1d  = daily_doy.values              # (T,)
+        bg_vals  = bg.values                     # (ny, nx)
+        ny, nx   = vals.shape[1], vals.shape[2]
+
+        rise_doy  = rising_doy.values            # (ny, nx)
+        fall_doy  = falling_doy.values           # (ny, nx)
+
+        # Spline value at the exact transition DOYs → ceiling for outside region
+        rise_idx_1d = np.argmin(np.abs(doys_1d[:, None, None] - rise_doy[None]), axis=0)
+        fall_idx_1d = np.argmin(np.abs(doys_1d[:, None, None] - fall_doy[None]), axis=0)
+
+        # (ny, nx) — the spline value at each pixel's transition DOY
+        spline_at_rise = vals[rise_idx_1d, np.arange(ny)[:, None], np.arange(nx)[None, :]]
+        spline_at_fall = vals[fall_idx_1d, np.arange(ny)[:, None], np.arange(nx)[None, :]]
+
+        for t_idx in range(len(doys_1d)):
+            d           = doys_1d[t_idx]
+            before_rise = d < rise_doy                  # (ny, nx)
+            after_fall  = d > fall_doy
+
+            # Pre-season: clamp to [bg, spline_at_rise]
+            vals[t_idx] = np.where(
+                before_rise,
+                np.clip(vals[t_idx], bg_vals, spline_at_rise),
+                vals[t_idx]
+            )
+            # Post-season: clamp to [bg, spline_at_fall]
+            vals[t_idx] = np.where(
+                after_fall,
+                np.clip(vals[t_idx], bg_vals, spline_at_fall),
+                vals[t_idx]
+            )
+
+        smoothed_year = smoothed_year.copy(data=vals)
+
+        smoothed_year_pheno = smoothed_year.where(
+            (daily_doy >= rising_doy) & (daily_doy <= falling_doy)
+        )
+
     else:
+        smoothed_year = smoothed_daily
         smoothed_year_pheno = smoothed_daily.sel(time=str(target_year))
-        chunk_post_snow_fill = None
+        
+    chunk_post_snow_fill = smoothed_year.copy(deep=True) if testing_mode else None
 
     # Step 6: Annual phenometrics
     # smoothed_year = smoothed_daily.where(smoothed_daily.time.dt.year == target_year)        
