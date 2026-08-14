@@ -37,6 +37,10 @@ import glob
 from scipy import stats
 from rasterio.plot import plotting_extent
 from rasterio.transform import array_bounds
+from rasterio.warp import reproject
+from rasterio.enums import Resampling
+
+from PHENO_testing import *
 
 # Regression helper functions
 def calculate_r(observed, predicted):
@@ -1282,7 +1286,6 @@ def smooth_vi_chunk_for_year(
         # 11. Reassemble
         # ----------------------------------------------------------------
         n_fitted = n_skipped = 0
-
         if smoother == "savgol":
             for row_start, row_end, row_result, in results:
                 smoothed_out[:, row_start:row_end, :] = row_result
@@ -1946,10 +1949,10 @@ def full_pipeline_chunk(chunk: xr.DataArray,
             for t in removed_times:
                 print(f"    {pd.Timestamp(t).date()}")
             
-    chunk_post_despike = chunk.copy(deep=True) if testing_mode else None
+    chunk_post_despike = chunk.copy(deep=True) #if testing_mode else None
 
     # -----------------------------------------------------------------------------------------
-    # Step 3b: Context-year gap infill
+    # Step 2b: Context-year gap infill
     # Uses despiked observations from context years to fill gaps in the
     # target year before the spline sees the data.
     # context_infill_diagnostics = None
@@ -1962,7 +1965,7 @@ def full_pipeline_chunk(chunk: xr.DataArray,
     # })
 
     # if len(context_years_present) >= 1 and use_infill == True:
-    #     print("Step 3b: Context-year observation infill")
+    #     print("Step 2b: Context-year observation infill")
     #     target_da_for_spline, context_infill_diagnostics = build_context_infilled_observations(
     #         chunk_despiked  = chunk,             # full 3-yr despiked DataArray
     #         target_year     = target_year,
@@ -1981,7 +1984,7 @@ def full_pipeline_chunk(chunk: xr.DataArray,
     #         dim="time"
     #     ).sortby("time")
     # else:
-    #     print("Step 3b: Context infill skipped "
+    #     print("Step 2b: Context infill skipped "
     #             f"(use_context_months={use_context_months}, "
     #             f"context_years={context_years_present})")
     #     chunk_for_spline = chunk
@@ -2022,7 +2025,10 @@ def full_pipeline_chunk(chunk: xr.DataArray,
         sensor=sensor,
     )
     
-    chunk_post_spline = smoothed_daily.copy(deep=True) if testing_mode else None
+    chunk_post_spline = smoothed_daily.copy(deep=True) #if testing_mode else None
+
+    # Testing fill_snow_gaps
+    # fill_snow_gaps = True
     
     if fill_snow_gaps:
         # Step 5: Fill snow gaps using naive min EVI2 value
@@ -2043,7 +2049,28 @@ def full_pipeline_chunk(chunk: xr.DataArray,
         before_first = daily_doy < first_obs_doy
         after_last   = daily_doy > last_obs_doy
         
-        # no_data      = ~has_any
+    #     no_data      = ~has_any
+    
+    #     # Spline value at the exact boundary day [y, x]
+    #     first_doy_idx  = (daily_doy == first_obs_doy)
+    #     last_doy_idx   = (daily_doy == last_obs_doy)
+    
+    #     spline_at_first = smoothed_year.where(first_doy_idx).max(dim="time")
+    #     spline_at_last  = smoothed_year.where(last_doy_idx).max(dim="time")
+    
+    #     # Fill = min(background, spline at boundary) — never step up OR down
+    #     lead_fill  = xr.where(spline_at_first < bg, spline_at_first, bg)
+    #     trail_fill = xr.where(spline_at_last  < bg, spline_at_last,  bg)
+    
+    #     smoothed_year = smoothed_year.where(~(before_first | no_data), other=lead_fill)
+    #     smoothed_year = smoothed_year.where(~(after_last   | no_data), other=trail_fill)    
+    #     smoothed_year_pheno = smoothed_daily.sel(time=str(target_year)).where(
+    #         (daily_doy >= first_obs_doy) & (daily_doy <= last_obs_doy)
+    #     )
+    #     chunk_post_snow_fill = smoothed_year.copy(deep=True) if testing_mode else None
+    # else:
+    #     smoothed_year_pheno = smoothed_daily.sel(time=str(target_year))
+    #     chunk_post_snow_fill = None
         outside_obs  = (before_first | after_last | ~has_any)
 
         # Spline is kept where it sits above the floor; clamped to floor where below
@@ -2110,6 +2137,65 @@ def full_pipeline_chunk(chunk: xr.DataArray,
         
     chunk_post_snow_fill = smoothed_year.copy(deep=True) if testing_mode else None
 
+    # background_threshold = calc_obs_snow_background(chunk) 
+    target_obs  = chunk_post_despike.sel(time=str(target_year))
+    is_valid = target_obs.notnull()
+    has_any   = is_valid.any(dim="time")              
+    first_idx = is_valid.argmax(dim="time").compute()            
+    last_idx  = (target_obs.sizes["time"] - 1 - is_valid.isel(time=slice(None, None, -1)).argmax(dim="time")).compute()                                           
+    first_obs_doy = target_obs.time.dt.dayofyear.isel(time=first_idx).where(has_any)
+    last_obs_doy  = target_obs.time.dt.dayofyear.isel(time=last_idx).where(has_any)
+    # bg            = background_threshold.drop_vars("quantile", errors="ignore")
+    # first_obs = chunk_post_despike.sel(time=str(target_year)).isel(time=first_idx).where(has_any)
+    # last_obs = chunk_post_despike.sel(time=str(target_year)).isel(time=last_idx).where(has_any)
+
+    daily_doy = smoothed_year_pheno.time.dt.dayofyear
+    spline_year = smoothed_daily.sel(time=str(target_year))
+    spline_at_first = (
+        spline_year
+        .where(daily_doy == first_obs_doy)
+        .max(dim="time")
+    )
+    spline_at_last = (
+        spline_year
+        .where(daily_doy == last_obs_doy)
+        .max(dim="time")
+    )
+    
+    if testing_mode:
+        target_chunk_post_snow_fill = chunk_post_snow_fill.sel(time=str(target_year))
+        daily_doy     = target_chunk_post_snow_fill.time.dt.dayofyear
+        before_first = daily_doy < first_obs_doy
+        after_last   = daily_doy > last_obs_doy
+        # outside_obs  = (before_first | after_last)
+        
+        # Spline is kept within the range where there are observations
+        target_chunk_post_snow_fill = xr.where(
+            before_first,
+            spline_at_first,
+            xr.where(
+                after_last,
+                spline_at_last,
+                target_chunk_post_snow_fill
+            )
+        )
+        chunk_post_snow_fill.loc[{"time": target_chunk_post_snow_fill.time}] = target_chunk_post_snow_fill
+
+    daily_doy = smoothed_year_pheno.time.dt.dayofyear
+    before_first = daily_doy < first_obs_doy
+    after_last   = daily_doy > last_obs_doy
+    # outside_obs  = (before_first | after_last)
+    
+    smoothed_year_pheno = xr.where(
+        before_first,
+        spline_at_first,
+        xr.where(
+            after_last,
+            spline_at_last,
+            smoothed_year_pheno
+        )
+    )
+    
     # Step 6: Annual phenometrics
     # smoothed_year = smoothed_daily.where(smoothed_daily.time.dt.year == target_year)        
     print("Step 6: Calculate phenometrics")
@@ -2136,7 +2222,7 @@ def full_pipeline_chunk(chunk: xr.DataArray,
 
     return results
 
-def phenometrics(vi_cube, doy_cube, sensor, veg_index, outdir, tile_id, start_year, end_year):
+def phenometrics(vi_cube, doy_cube, sensor, smoother, veg_index, outdir, tile_id, start_year, end_year):
     # Grab the bounds and crs from the vi_cube (the doy_cube should have the same values)
     bounds = vi_cube.rio.bounds()
     crs = vi_cube.rio.crs
@@ -2157,7 +2243,8 @@ def phenometrics(vi_cube, doy_cube, sensor, veg_index, outdir, tile_id, start_ye
             vi_window,
             doy_data=doy_window,
             target_year=year,
-            sensor=sensor
+            sensor=sensor,
+            smoother=smoother,
         )
         
         for metric in results:
@@ -2407,5 +2494,349 @@ def plot_phenology_summary(summary_df, veg_index, outdir, tile_id):
 
     png_path = os.path.join(outdir, f"{tile_id}_{vi_upper}_annual_phenology_summary.png")
     fig.savefig(png_path, dpi=150, bbox_inches="tight")
+    plt.show()
+    print(f"Plot saved: {png_path}")
+
+def raster_pearson_r(hls_tif, modis_tif, resampling=Resampling.average):
+    with rasterio.open(hls_tif) as hls, rasterio.open(modis_tif) as modis:
+        # Create an output array with the exact MODIS grid
+        hls_resampled = np.full((modis.height, modis.width), np.nan, dtype=np.float32)
+
+        reproject(source=rasterio.band(hls, 1), destination=hls_resampled,
+                  src_transform=hls.transform, src_crs=hls.crs,
+                  src_nodata=hls.nodata, dst_transform=modis.transform,
+                  dst_crs=modis.crs, dst_nodata=np.nan, resampling=resampling)
+
+        # Read MODIS
+        modis_data = modis.read(1, masked=True)
+
+        # Valid pixels in both rasters
+        mask = (np.isfinite(hls_resampled) & ~modis_data.mask & np.isfinite(modis_data.data))
+
+        # print("HLS resampled:")
+        # print(np.nanmean(hls_resampled))
+        # print("MODIS:")
+        # print(np.nanmean(modis_data.data[~modis_data.mask]))
+        # print("Valid paired pixels:", mask.sum())
+
+        x = hls_resampled[mask]
+        y = modis_data.data[mask]
+
+        # Need at least 2 observations
+        if len(x) < 2:
+            return np.nan
+
+        # Pearson r
+        r = np.corrcoef(x, y)[0, 1]
+
+        return r
+
+def create_correlation_dfs(veg_index, tiles, start_year, end_year, metrics):
+    vi_upper = veg_index.upper()
+    
+    correlation_dfs = []
+
+    for tile_id in tiles:
+        outdir = f"hls_modis_comparisons/{tile_id}"
+        rows = []
+        for year in range(start_year, end_year+1):
+            row = {
+                "year": year
+            }
+            
+            for metric in metrics:
+                hls_tif = os.path.join(outdir, f"{tile_id}_HLS_{vi_upper}_{metric[0]}_{year}.tif")
+                modis_tif = os.path.join(outdir, f"{tile_id}_MODIS_{vi_upper}_{metric[0]}_{year}.tif")
+        
+                if not os.path.exists(hls_tif) or not os.path.exists(modis_tif):
+                    row[metric[0]] = np.nan
+                    continue
+                
+                row[metric[0]] = raster_pearson_r(
+                    hls_tif,
+                    modis_tif
+                )
+            
+            rows.append(row)
+            
+        correlation_df = pd.DataFrame(rows)
+        correlation_dfs.append(correlation_df)
+
+    return correlation_dfs
+
+def plot_line_plot(veg_index, metrics, summary_dfs, correlation_dfs, sites):
+    vi_upper = veg_index.upper()
+    n_panels = len(metrics)
+    ncols    = len(metrics) + 1 # 2
+    nrows    = len(summary_dfs) # math.ceil(n_panels / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(21, 4 * nrows), sharex=False, squeeze=False)
+    axes = np.atleast_2d(axes)
+    
+    sensor_style = {
+        "HLS": dict(color="steelblue", marker="o", zorder=3),
+        "MODIS": dict(color="darkorange", marker="s", zorder=3),
+    }
+    
+    for df_idx, summary_df in enumerate(summary_dfs):
+        for metric_idx, (col, title, ylabel, std_col) in enumerate(metrics):
+            ax = axes[df_idx, metric_idx]
+            
+            for sensor, style in sensor_style.items():
+                sub = summary_df[summary_df["sensor"] == sensor].dropna(subset=[col, std_col])
+                if sub.empty:
+                    continue
+                
+                # Line plot
+                ax.scatter(sub["year"], sub[col],
+                           label=sensor, s=60,
+                           **style)
+                # connect points with a thin line to help readability
+                ax.plot(sub["year"], sub[col],
+                        color=style["color"], linewidth=0.8,
+                        alpha=0.5, zorder=2)
+                # Show std
+                ax.fill_between(
+                    sub["year"],
+                    sub[col] - sub[std_col],
+                    sub[col] + sub[std_col],
+                    color=style["color"],
+                    alpha=0.2,
+                    linewidth=0,
+                    zorder=1
+                )
+    
+            ax.set_title(f"{title} ± 1σ", fontsize=11)
+            ax.set_xlabel("Year")
+            ax.set_ylabel(ylabel)
+            ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+            ax.legend(fontsize=8, loc="best")
+            ax.grid(True, linestyle="--", linewidth=0.4, alpha=0.6)
+
+        # The correlations is set to use your first 2 metrics, since it's assumed you're only
+        # looking at 2 metrics
+        corr_df = correlation_dfs[df_idx]
+        ax_corr = axes[df_idx, 2]
+        
+        ax_corr.plot(corr_df["year"], corr_df[metrics[0][0]],
+                     color="steelblue", marker="o",
+                     linewidth=0.8, label=metrics[0][1])
+        
+        ax_corr.plot(corr_df["year"], corr_df[metrics[1][0]],
+                     color="darkorange", marker="s",
+                     linewidth=0.8, label=metrics[1][1])
+        
+        ax_corr.set_title("HLS–MODIS Correlation", fontsize=11)
+        ax_corr.set_xlabel("Year")
+        ax_corr.set_ylabel("Pearson's r")
+        ax_corr.set_ylim(-1, 1)
+        ax_corr.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+        ax_corr.grid(True, linestyle="--", linewidth=0.4, alpha=0.6) 
+        ax_corr.legend(fontsize=8, loc="best")
+    
+    # Label rows
+    for row_idx, site in enumerate(sites):
+        axes[row_idx, 0].annotate(site, xy=(-0.25, 0.5), xycoords="axes fraction",
+                                  rotation=90, va="center", ha="center",
+                                  fontsize=11, fontweight="bold")
+    
+    fig.suptitle(f"{vi_upper} Annual Phenology Summary",
+                 fontsize=13, fontweight="bold", y=1.01)
+    fig.tight_layout()
+    
+    png_path = os.path.join("hls_modis_comparisons/", f"{vi_upper}_annual_phenology_summary.png")
+    fig.savefig(png_path, dpi=500, bbox_inches="tight")
+    plt.show()
+    print(f"Plot saved: {png_path}")
+
+def plot_bar_plot(veg_index, metrics, summary_dfs, correlation_dfs, sites):
+    vi_upper = veg_index.upper()
+    n_panels = len(metrics)
+    ncols    = len(metrics) + 1 # 2
+    nrows    = len(summary_dfs) # math.ceil(n_panels / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(21, 4 * nrows), sharex=False, squeeze=False)
+    axes = np.atleast_2d(axes)
+    width = 0.35
+    
+    sensor_style = {
+        "HLS": dict(color="steelblue", marker="o", zorder=3),
+        "MODIS": dict(color="darkorange", marker="s", zorder=3),
+    }
+    
+    for df_idx, summary_df in enumerate(summary_dfs):
+        for metric_idx, (col, title, ylabel, std_col) in enumerate(metrics):
+            ax = axes[df_idx, metric_idx]
+            
+            for sensor, style in sensor_style.items():
+                sub = summary_df[summary_df["sensor"] == sensor].dropna(subset=[col, std_col])
+                if sub.empty:
+                    continue
+                
+                # Bar plot
+                x = np.arange(len(sub))
+                offset = -width / 2 if sensor == "HLS" else width / 2
+                ax.bar(x + offset, sub[col], width=width,
+                       color=style["color"], yerr=sub[std_col],
+                       capsize=3, label=sensor)
+    
+            ax.set_title(f"{title} ± 1σ", fontsize=11)
+            ax.set_xlabel("Year")
+            ax.set_ylabel(ylabel)
+            ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+            ax.legend(fontsize=8, loc="best")
+            ax.grid(True, linestyle="--", linewidth=0.4, alpha=0.6)
+
+        # The correlations is set to use your first 2 metrics, since it's assumed you're only
+        # looking at 2 metrics
+        corr_df = correlation_dfs[df_idx]
+        ax_corr = axes[df_idx, 2]
+        
+        ax_corr.plot(corr_df["year"], corr_df[metrics[0][0]],
+                     color="steelblue", marker="o",
+                     linewidth=0.8, label=metrics[0][1])
+        
+        ax_corr.plot(corr_df["year"], corr_df[metrics[1][0]],
+                     color="darkorange", marker="s",
+                     linewidth=0.8, label=metrics[1][1])
+        
+        ax_corr.set_title("HLS–MODIS Correlation", fontsize=11)
+        ax_corr.set_xlabel("Year")
+        ax_corr.set_ylabel("Pearson's r")
+        ax_corr.set_ylim(-1, 1)
+        ax_corr.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+        ax_corr.grid(True, linestyle="--", linewidth=0.4, alpha=0.6) 
+        ax_corr.legend(fontsize=8, loc="best")
+    
+    # Label rows
+    for row_idx, site in enumerate(sites):
+        axes[row_idx, 0].annotate(site, xy=(-0.25, 0.5), xycoords="axes fraction",
+                                  rotation=90, va="center", ha="center",
+                                  fontsize=11, fontweight="bold")
+    
+    fig.suptitle(f"{vi_upper} Annual Phenology Summary",
+                 fontsize=13, fontweight="bold", y=1.01)
+    fig.tight_layout()
+    
+    png_path = os.path.join("hls_modis_comparisons/", f"{vi_upper}_annual_phenology_summary.png")
+    fig.savefig(png_path, dpi=500, bbox_inches="tight")
+    plt.show()
+    print(f"Plot saved: {png_path}")
+
+def plot_box_and_whiskers_plot(veg_index, metrics, tiles, start_year, end_year, correlation_dfs, sites):
+    # Box and whiskers plot version
+    vi_upper = veg_index.upper()
+    n_panels = len(metrics)
+    ncols    = len(metrics) + 1 # 2
+    nrows    = len(tiles) # math.ceil(n_panels / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(21, 4 * nrows), sharex=False, squeeze=False)
+    axes = np.atleast_2d(axes)
+    
+    for tile_idx, (tile_id) in enumerate(tiles):
+        outdir = f"hls_modis_comparisons/{tile_id}"
+        for metric_idx, (metric, title, ylabel, metric_std) in enumerate(metrics):
+            ax = axes[tile_idx, metric_idx]
+            sensor_values = {
+                "HLS": {},
+                "MODIS": {}
+            }
+            for sensor in ["HLS", "MODIS"]:
+                for year in range(start_year, end_year+1):
+                    tif = os.path.join(outdir, f"{tile_id}_{sensor}_{vi_upper}_{metric}_{year}.tif")
+                    if not os.path.exists(tif):
+                        continue
+                    
+                    with rasterio.open(tif) as src:
+                        data = src.read(1)
+                    
+                    # Keep only finite values
+                    values = data[np.isfinite(data)]
+                    
+                    if len(values) == 0:
+                        continue
+    
+                    sensor_values[sensor][year] = values
+    
+            year_list = sorted(set(sensor_values["HLS"]) | set(sensor_values["MODIS"]))
+    
+            positions_hls = []
+            positions_modis = []
+            hls_data = []
+            modis_data = []
+    
+            for i, year in enumerate(year_list):
+                center = i + 1
+    
+                if year in sensor_values["HLS"]:
+                    positions_hls.append(center - 0.18)
+                    hls_data.append(sensor_values["HLS"][year])
+    
+                if year in sensor_values["MODIS"]:
+                    positions_modis.append(center + 0.18)
+                    modis_data.append(sensor_values["MODIS"][year])
+    
+            if hls_data:
+                bp_hls = ax.boxplot(hls_data, positions=positions_hls, widths=0.30,
+                                    patch_artist=True, showfliers=False,
+                                    medianprops=dict(color="black", linewidth=1),
+                                    whiskerprops=dict(color="steelblue"),
+                                    capprops=dict(color="steelblue"), label="HLS")
+    
+                for box in bp_hls["boxes"]:
+                    box.set_facecolor("steelblue")
+                    box.set_alpha(0.65)
+    
+            if modis_data:
+                bp_modis = ax.boxplot(modis_data, positions=positions_modis, widths=0.30,
+                                      patch_artist=True, showfliers=False,
+                                      medianprops=dict(color="black", linewidth=1),
+                                      whiskerprops=dict(color="darkorange"),
+                                      capprops=dict(color="darkorange"), label="MODIS")
+    
+                for box in bp_modis["boxes"]:
+                    box.set_facecolor("darkorange")
+                    box.set_alpha(0.65)
+                    
+            ax.set_title(title, fontsize=11)
+            ax.set_xlabel("Year")
+            ax.set_ylabel(ylabel)
+            ax.set_xticks(range(1, len(year_list) + 1))
+            ax.set_xticklabels(year_list)
+            ax.legend(fontsize=8, loc="best")
+            ax.grid(True, linestyle="--", linewidth=0.4, alpha=0.6)
+    
+        # The correlations is set to use your first 2 metrics, since it's assumed you're only
+        # looking at 2 metrics
+        corr_df = correlation_dfs[tile_idx]
+        ax_corr = axes[tile_idx, 2]
+        
+        ax_corr.plot(corr_df["year"], corr_df[metrics[0][0]],
+                     color="steelblue", marker="o",
+                     linewidth=0.8, label=metrics[0][1])
+        
+        ax_corr.plot(corr_df["year"], corr_df[metrics[1][0]],
+                     color="darkorange", marker="s",
+                     linewidth=0.8, label=metrics[1][1])
+        
+        ax_corr.set_title("HLS–MODIS Correlation", fontsize=11)
+        ax_corr.set_xlabel("Year")
+        ax_corr.set_ylabel("Pearson's r")
+        ax_corr.set_ylim(-1, 1)
+        ax_corr.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+        ax_corr.grid(True, linestyle="--", linewidth=0.4, alpha=0.6) 
+        ax_corr.legend(fontsize=8, loc="best")
+    
+    
+    # Label rows
+    for row_idx, site in enumerate(sites):
+        axes[row_idx, 0].annotate(site, xy=(-0.25, 0.5), xycoords="axes fraction",
+                                  rotation=90, va="center", ha="center",
+                                  fontsize=11, fontweight="bold")
+    
+    
+    fig.suptitle(f"{vi_upper} Annual Phenology Summary",
+                 fontsize=13, fontweight="bold", y=1.01)
+    fig.tight_layout()
+    
+    png_path = os.path.join("hls_modis_comparisons/", f"{vi_upper}_annual_phenology_summary.png")
+    fig.savefig(png_path, dpi=500, bbox_inches="tight")
     plt.show()
     print(f"Plot saved: {png_path}")

@@ -28,7 +28,7 @@ class ProcessingConfig:
     """Configuration for EVI processing pipeline."""
     base_path: Path
     tile_id: str
-    evi_pattern: str = "*_EVI2.tif" #for HLS and "*_EVI2_*.tif" for MODIS
+    evi_pattern: str = "*_EVI2.tif" #for HLS "*_EVI2_*.tif" # for MODIS
     
     #"*.EVI2.tif"  # glob pattern for EVI files
 
@@ -48,6 +48,7 @@ class ProcessingConfig:
     def date_pattern(self):
         # return self.DATE_PATTERNS.get(self.cadence)
         return r'_(\d{7})_EVI2\.tif$' # r'\.(\d{7})\.\d+\.\d+\.'
+        # r'_(\d{8})\.tif$'
 
     @property
     def has_doy_file(self):
@@ -96,6 +97,7 @@ class EVIScene:
 
 def parse_date_from_filename(filename: str, pattern: str, cadence: str = 'daily') -> datetime | None:
     """Extract datetime from filename using pattern."""
+    
     match = re.search(pattern, filename)
     
     if not match:
@@ -107,6 +109,13 @@ def parse_date_from_filename(filename: str, pattern: str, cadence: str = 'daily'
         year = int(date_str[:4])
         doy = int(date_str[4:])
         return datetime(year, 1, 1) + timedelta(days=doy - 1)
+
+        # For year, month, day format
+        # date_str = match.group(1)  # YYYYMMDD
+        # year = int(date_str[:4])
+        # month = int(date_str[4:6])
+        # day = int(date_str[6:8])
+        # return datetime(year, month, day)
     except (ValueError, OverflowError):
         return None
 
@@ -122,7 +131,7 @@ def discover_evi_scenes(config: ProcessingConfig, recursive: bool = True) -> lis
     glob_method = config.evi_dir.rglob if recursive else config.evi_dir.glob
     # I tried using config.evi_pattern but for some reason that's still
     # *.EVI2.tif instead of *_EVI2.tif
-    evi_files = sorted(glob_method("*_EVI2.tif"))
+    evi_files = sorted(glob_method(config.evi_pattern))
 
     print(f"Found {len(evi_files)} EVI files in {config.evi_dir}")
 
@@ -130,7 +139,7 @@ def discover_evi_scenes(config: ProcessingConfig, recursive: bool = True) -> lis
 
     for filepath in evi_files:
         # Like config.evi_pattern, config.date_pattern isn't updating, so I'm using the value directly
-        date_obj = parse_date_from_filename(filepath.name, r'_(\d{7})_EVI2\.tif$' )
+        date_obj = parse_date_from_filename(filepath.name, config.date_pattern)# r'_(\d{7})_EVI2\.tif$')
 
         if date_obj is None:
             print(f"  Warning: Could not parse date from {filepath.name}")
@@ -1177,6 +1186,7 @@ def plot_pixel_phenometrics(ds, chunk_results, yi=0, xi=1, target_year=None):
     ax1.set_ylabel('EVI')
     ax1.legend(fontsize=7, loc='upper right', ncol=2)
     ax1.grid(True, alpha=0.3)
+    # ax1.set_ylim(-0.2, 0.3)
     
     # ================================================================
     # Bottom panel: Summary table with NaN flagging
