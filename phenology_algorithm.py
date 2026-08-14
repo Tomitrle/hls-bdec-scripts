@@ -2902,11 +2902,11 @@ def plot_vi_timeseries_fig(veg_index, stat, dfs, sites):
     for row_idx, (hls_df, modis_df) in enumerate(dfs):
         plot_vi_timeseries_axes(hls_df, modis_df, veg_index, stat, axes[row_idx])
     
-        # Site annotation on left
-        axes[row_idx].annotate(site, xy=(-0.10, 0.5),
-                               xycoords="axes fraction", rotation=90,
-                               va="center", ha="center",
-                               fontsize=11, fontweight="bold",)
+    # Label rows
+    for row_idx, site in enumerate(sites):
+        axes[row_idx].annotate(site, xy=(-0.1, 0.5), xycoords="axes fraction",
+                                  rotation=90, va="center", ha="center",
+                                  fontsize=11, fontweight="bold")
     
     fig.suptitle(f"{vi_upper} Timeseries — HLS vs MODIS", fontsize=14, fontweight="bold", y=0.98,)
     fig.tight_layout(rect=[0, 0, 1, 0.98])
@@ -3005,17 +3005,11 @@ def plot_vi_seasonal_mean_fig(veg_index, stat, dfs, sites):
     for ax, (hls_df, modis_df) in zip(axes, dfs):
         plot_vi_seasonal_mean_axes(veg_index, stat, hls_df, modis_df, ax)
     
+    # Label rows
     for row_idx, site in enumerate(sites):
-        axes[row_idx].annotate(
-            site,
-            xy=(-0.1, 0.5),
-            xycoords="axes fraction",
-            rotation=90,
-            va="center",
-            ha="center",
-            fontsize=11,
-            fontweight="bold"
-        )
+        axes[row_idx].annotate(site, xy=(-0.1, 0.5), xycoords="axes fraction",
+                                  rotation=90, va="center", ha="center",
+                                  fontsize=11, fontweight="bold")
     
     fig.suptitle(
         f"{vi_upper} Multi-Year Seasonal Mean ± 1σ",
