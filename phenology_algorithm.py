@@ -1955,41 +1955,41 @@ def full_pipeline_chunk(chunk: xr.DataArray,
     # Step 2b: Context-year gap infill
     # Uses despiked observations from context years to fill gaps in the
     # target year before the spline sees the data.
-    # context_infill_diagnostics = None
-    # target_da_for_spline = chunk.sel(time=str(target_year))  # default: no infill
+    context_infill_diagnostics = None
+    target_da_for_spline = chunk.sel(time=str(target_year))  # default: no infill
 
-    # use_context_months = get_context_months_from_gaps(chunk=chunk, target_year=target_year)
-    # context_years_present = sorted({
-    #     int(y) for y in chunk.time.dt.year.values
-    #     if int(y) != target_year
-    # })
+    use_context_months = get_context_months_from_gaps(chunk=chunk, target_year=target_year)
+    context_years_present = sorted({
+        int(y) for y in chunk.time.dt.year.values
+        if int(y) != target_year
+    })
 
-    # if len(context_years_present) >= 1 and use_infill == True:
-    #     print("Step 2b: Context-year observation infill")
-    #     target_da_for_spline, context_infill_diagnostics = build_context_infilled_observations(
-    #         chunk_despiked  = chunk,             # full 3-yr despiked DataArray
-    #         target_year     = target_year,
-    #         n_harmonics     = 3,
-    #         min_similarity  = 0.60,              # tune: lower = more permissive infill
-    #         scale_to_target = True,
-    #         testing_mode    = testing_mode,
-    #     )
-    #     # Rebuild a chunk that contains the infilled target year so the spline
-    #     # fitter receives the augmented observations
-    #     other_years = chunk.sel(
-    #         time=~chunk.time.dt.year.isin([target_year])
-    #     )
-    #     chunk_for_spline = xr.concat(
-    #         [other_years, target_da_for_spline],
-    #         dim="time"
-    #     ).sortby("time")
-    # else:
-    #     print("Step 2b: Context infill skipped "
-    #             f"(use_context_months={use_context_months}, "
-    #             f"context_years={context_years_present})")
-    #     chunk_for_spline = chunk
+    if len(context_years_present) >= 1 and use_infill == True:
+        print("Step 2b: Context-year observation infill")
+        target_da_for_spline, context_infill_diagnostics = build_context_infilled_observations(
+            chunk_despiked  = chunk,             # full 3-yr despiked DataArray
+            target_year     = target_year,
+            n_harmonics     = 3,
+            min_similarity  = 0.60,              # tune: lower = more permissive infill
+            scale_to_target = True,
+            testing_mode    = testing_mode,
+        )
+        # Rebuild a chunk that contains the infilled target year so the spline
+        # fitter receives the augmented observations
+        other_years = chunk.sel(
+            time=~chunk.time.dt.year.isin([target_year])
+        )
+        chunk_for_spline = xr.concat(
+            [other_years, target_da_for_spline],
+            dim="time"
+        ).sortby("time")
+    else:
+        print("Step 2b: Context infill skipped "
+                f"(use_context_months={use_context_months}, "
+                f"context_years={context_years_present})")
+        chunk_for_spline = chunk
 
-    # chunk_post_context_infill = chunk_for_spline.copy(deep=True) if testing_mode else None
+    chunk_post_context_infill = chunk_for_spline.copy(deep=True) if testing_mode else None
 
     # Step 3: calculate scene revisit and quality pixels before the spline fit, 365 DOY data is generated
     print("Step 3: Scene quality metrics")
@@ -2151,16 +2151,8 @@ def full_pipeline_chunk(chunk: xr.DataArray,
 
     daily_doy = smoothed_year_pheno.time.dt.dayofyear
     spline_year = smoothed_daily.sel(time=str(target_year))
-    spline_at_first = (
-        spline_year
-        .where(daily_doy == first_obs_doy)
-        .max(dim="time")
-    )
-    spline_at_last = (
-        spline_year
-        .where(daily_doy == last_obs_doy)
-        .max(dim="time")
-    )
+    spline_at_first = spline_year.where(daily_doy == first_obs_doy).max(dim="time")
+    spline_at_last = spline_year.where(daily_doy == last_obs_doy).max(dim="time")
     
     if testing_mode:
         target_chunk_post_snow_fill = chunk_post_snow_fill.sel(time=str(target_year))
@@ -2840,3 +2832,197 @@ def plot_box_and_whiskers_plot(veg_index, metrics, tiles, start_year, end_year, 
     fig.savefig(png_path, dpi=500, bbox_inches="tight")
     plt.show()
     print(f"Plot saved: {png_path}")
+
+def plot_vi_timeseries_axes(hls_df, modis_df, veg_index, stat, ax):
+    vi_col   = f"{veg_index.lower()}_{stat}"
+    std_col  = f"{veg_index.lower()}_stdev"
+    vi_upper = veg_index.upper()
+    hls_bin_width=10      # matches HLS 10-day composite cadence
+    modis_bin_width=16    # matches MODIS 16-day composite cadence
+    
+    # ── HLS timeseries ────────────────────────────────────────────────────────
+    if not hls_df.empty and vi_col in hls_df.columns:
+        hls_plot_df = hls_df.copy()
+        hls_plot_df["composite_mean_date"] = pd.to_datetime(hls_plot_df["composite_mean_date"])
+        hls_plot_df = hls_plot_df.sort_values("composite_mean_date").reset_index(drop=True)
+
+        hls_x = hls_plot_df["composite_mean_date"]
+        hls_y = hls_plot_df[vi_col]
+
+        ax.plot(hls_x, hls_y,
+                color="steelblue", linewidth=1.5, marker="o", markersize=3,
+                label=f"HLS {vi_upper} ({stat})")
+
+        if std_col in hls_plot_df.columns:
+            ax.fill_between(hls_x,
+                            hls_y - hls_plot_df[std_col],
+                            hls_y + hls_plot_df[std_col],
+                            color="steelblue", alpha=0.15, label="HLS ±1σ")
+
+    else:
+        print(f"Warning: HLS DataFrame is empty or missing {vi_col} — skipping HLS plot")
+
+    # ── MODIS timeseries ──────────────────────────────────────────────────────
+    if not modis_df.empty and vi_col in modis_df.columns:
+        modis_plot_df = modis_df.copy()
+        modis_plot_df["composite_mean_date"] = pd.to_datetime(modis_plot_df["composite_mean_date"])
+        modis_plot_df = modis_plot_df.sort_values("composite_mean_date").reset_index(drop=True)
+
+        mod_x = modis_plot_df["composite_mean_date"]
+        mod_y = modis_plot_df[vi_col]
+
+        ax.plot(mod_x, mod_y,
+                color="darkorange", linewidth=1.5, marker="s", markersize=3,
+                label=f"MODIS {vi_upper} ({stat})")
+
+        if std_col in modis_plot_df.columns:
+            ax.fill_between(mod_x,
+                            mod_y - modis_plot_df[std_col],
+                            mod_y + modis_plot_df[std_col],
+                            color="darkorange", alpha=0.15, label="MODIS ±1σ")
+
+    else:
+        print(f"Warning: MODIS DataFrame is empty or missing {vi_col} — skipping MODIS plot")
+
+    # ── Formatting ────────────────────────────────────────────────────────────
+    # ax.set_title(title, fontsize=12, fontweight="bold")
+    ax.set_xlabel("Date")
+    ax.set_ylabel(vi_upper)
+    ax.legend(loc="best", fontsize=9)
+    ax.xaxis.set_major_locator(mdates.YearLocator())
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+    ax.xaxis.set_minor_locator(mdates.MonthLocator(bymonth=[4, 7, 10]))
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+    ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.6)
+
+def plot_vi_timeseries_fig(veg_index, stat, dfs, sites):
+    vi_upper = veg_index.upper()
+    fig, axes = plt.subplots(3, 1, figsize=(14, 15))
+    
+    for row_idx, (hls_df, modis_df) in enumerate(dfs):
+        plot_vi_timeseries_axes(hls_df, modis_df, veg_index, stat, axes[row_idx])
+    
+        # Site annotation on left
+        axes[row_idx].annotate(site, xy=(-0.10, 0.5),
+                               xycoords="axes fraction", rotation=90,
+                               va="center", ha="center",
+                               fontsize=11, fontweight="bold",)
+    
+    fig.suptitle(f"{vi_upper} Timeseries — HLS vs MODIS", fontsize=14, fontweight="bold", y=0.98,)
+    fig.tight_layout(rect=[0, 0, 1, 0.98])
+    png_path = os.path.join("hls_modis_comparisons/",f"{vi_upper}_HLS_vs_MODIS_timeseries.png")
+    fig.savefig(png_path, dpi=500, bbox_inches="tight")
+    plt.show()
+
+def plot_vi_seasonal_mean_axes(veg_index, stat, hls_df, modis_df, ax):
+    vi_upper = veg_index.upper()
+    vi_col=f"{veg_index.lower()}_{stat}"
+    hls_bin_width=10      # matches HLS 10-day composite cadence
+    modis_bin_width=16    # matches MODIS 16-day composite cadence
+    
+    # ── helper: prep + bin ────────────────────────────────────────────────────
+    def _prep(df, date_col, bin_width):
+        d = df.copy()
+        d[date_col] = pd.to_datetime(d[date_col])
+        d = d.sort_values(date_col).reset_index(drop=True)
+        d["_year"] = d[date_col].dt.year
+        d["_doy"]  = d[date_col].dt.dayofyear
+    
+        # Bin to sensor-native cadence
+        d["_doy_bin"] = (((d["_doy"] - 1) // bin_width) * bin_width
+                         + bin_width // 2 + 1)
+        return d
+    
+    # ── helper: cross-year mean & std per DOY bin ─────────────────────────────
+    def _seasonal_stats(df):
+        return (
+            df.groupby("_doy_bin")[vi_col]
+            .agg(bin_mean="mean", bin_std="std", n_years="count")
+            .reset_index()
+            .sort_values("_doy_bin")
+        )
+
+    # ── per-sensor config — note separate bin_width per sensor ────────────────
+    sensor_cfg = {
+        "HLS": dict(
+            df=hls_df,
+            date_col="composite_mean_date",
+            color="steelblue",
+            marker="o",
+            bin_width=hls_bin_width,
+        ),
+        "MODIS": dict(
+            df=modis_df,
+            date_col="composite_mean_date",
+            color="darkorange",
+            marker="s",
+            bin_width=modis_bin_width,
+        ),
+    }
+
+    for sensor, cfg in sensor_cfg.items():
+        if cfg["df"].empty or vi_col not in cfg["df"].columns:
+            continue
+
+        prepped = _prep(cfg["df"], cfg["date_col"], cfg["bin_width"])
+        stats = _seasonal_stats(prepped)
+
+        x = stats["_doy_bin"].values
+        ymean = stats["bin_mean"].values
+        ystd = stats["bin_std"].fillna(0).values
+
+        # ── mean line ─────────────────────────────────────────────────────────
+        ax.plot(x, ymean,
+                color=cfg["color"], linewidth=2.0,
+                marker=cfg["marker"], markersize=4,
+                label=f"{sensor} {vi_upper} mean  (bin={cfg['bin_width']}d)",
+                zorder=3)
+
+        # ── ±1 std shading ────────────────────────────────────────────────────
+        ax.fill_between(x,
+                        ymean - ystd,
+                        ymean + ystd,
+                        color=cfg["color"], alpha=0.18,
+                        label=f"{sensor} ±1σ",
+                        zorder=2)
+
+     # ── month x-tick labels ───────────────────────────────────────────────────
+    month_doys   = [1, 32, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335]
+    month_labels = ["Jan","Feb","Mar","Apr","May","Jun",
+                    "Jul","Aug","Sep","Oct","Nov","Dec"]
+    ax.set_xticks(month_doys)
+    ax.set_xticklabels(month_labels)
+    ax.set_xlim(1, 365)
+    ax.set_xlabel("Month")
+    ax.legend(fontsize=9, loc="best")
+    ax.grid(True, linestyle="--", linewidth=0.4, alpha=0.6)  
+    ax.set_ylabel(vi_upper)
+
+def plot_vi_seasonal_mean_fig(veg_index, stat, dfs, sites):
+    vi_upper = veg_index.upper()
+    fig, axes = plt.subplots(3, 1, figsize=(14, 15))
+    
+    for ax, (hls_df, modis_df) in zip(axes, dfs):
+        plot_vi_seasonal_mean_axes(veg_index, stat, hls_df, modis_df, ax)
+    
+    for row_idx, site in enumerate(sites):
+        axes[row_idx].annotate(
+            site,
+            xy=(-0.1, 0.5),
+            xycoords="axes fraction",
+            rotation=90,
+            va="center",
+            ha="center",
+            fontsize=11,
+            fontweight="bold"
+        )
+    
+    fig.suptitle(
+        f"{vi_upper} Multi-Year Seasonal Mean ± 1σ",
+        fontsize=14,
+        fontweight="bold",
+    )
+    fig.tight_layout(rect=[0, 0, 1, .98])
+    png_path = os.path.join("hls_modis_comparisons/", f"{vi_upper}_multi_year_seasonal_mean.png")
+    fig.savefig(png_path, dpi=500, bbox_inches="tight")
+    plt.show()

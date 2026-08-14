@@ -1113,10 +1113,10 @@ def plot_pixel_phenometrics(ds, chunk_results, yi=0, xi=1, target_year=None):
     
     # All DOY-based markers to plot
     markers = [
-        ('greenup_doy', 'greenup_evi', 'v', 'limegreen', 'Greenup'),
-        ('max_doy', 'max_evi', '^', 'red', 'Peak'),
-        ('dormancy_doy', 'dormancy_evi', 'v', 'brown', 'Dormancy'),
-        ('min_doy', 'min_evi', 's', 'blue', 'Min'),
+        ('greenup_doy', 'greenup_vi', 'v', 'limegreen', 'Greenup'),
+        ('max_doy', 'max_vi', '^', 'red', 'Peak'),
+        ('dormancy_doy', 'dormancy_vi', 'v', 'brown', 'Dormancy'),
+        ('min_doy', 'min_vi', 's', 'blue', 'Min'),
         ('greenup_rate_doy', None, 'D', 'lime', 'Steepest Greenup'),
         ('senescence_rate_doy', None, 'D', 'orange', 'Steepest Senescence'),
     ]
@@ -1167,7 +1167,7 @@ def plot_pixel_phenometrics(ds, chunk_results, yi=0, xi=1, target_year=None):
     # AUC shading
     greenup_d = get_val('greenup_doy')
     dorm_d = get_val('dormancy_doy')
-    min_e = get_val('min_evi')
+    min_e = get_val('min_vi')
     
     if not np.isnan(greenup_d) and not np.isnan(dorm_d) and not np.isnan(min_e):
         gs_mask = ((smoothed.time.dt.year == target_year) &
